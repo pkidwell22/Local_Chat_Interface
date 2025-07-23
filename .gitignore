@@ -10,7 +10,7 @@ venv/
 *.venv/
 .env/
 
-# Jupyter Notebook checkpoints
+# Jupyter NotebookSS checkpoints
 .ipynb_checkpoints
 
 # PyCharm
