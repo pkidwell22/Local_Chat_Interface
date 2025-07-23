@@ -1,0 +1,27 @@
+cat > .gitignore <<EOF
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment
+.mistral-venv/
+venv/
+*.venv/
+.env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# PyCharm
+.idea/
+
+# Hugging Face cache
+~/.cache/huggingface/
+~/.huggingface/
+
+# Logs & chat history
+*.log
+*.json
+chatlogs/
+EOF
