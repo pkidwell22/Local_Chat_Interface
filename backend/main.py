@@ -1,90 +1,65 @@
-import json
-from datetime import datetime
-from pathlib import Path
-from difflib import SequenceMatcher
+# backend/main.py
 
-from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
+import json
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from pathlib import Path
 
-from backend.ollama_client import query_ollama
+from backend.retrieval import initialize_retrieval
+from backend.langchain_pipeline import get_chain  # ✅ Use LangChain pipeline now
 
 # ─── Config ─────────────────────────────────────────────────────────────
-CHATLOG_DIR = Path("backend/chatlogs")
-CHATLOG_DIR.mkdir(exist_ok=True)
+MEMORY_DIR = Path(__file__).parent / "chat_memory"
+MEMORY_DIR.mkdir(exist_ok=True)
 
-CHAT_DATA_FILE = Path("data/parsed_conversations.json")
-parsed_messages = []
-
-# ─── Load Cleaned ChatGPT History ───────────────────────────────────────
-if CHAT_DATA_FILE.exists():
-    with open(CHAT_DATA_FILE, encoding="utf-8") as f:
-        try:
-            all_convs = json.load(f)
-            for conv in all_convs:
-                parsed_messages.extend(conv.get("history", []))
-        except Exception as e:
-            print(f"⚠️ Failed to load parsed conversations: {e}")
-else:
-    print("⚠️ parsed_conversations.json not found — running without memory context.")
-
-# ─── Save Chat Session ──────────────────────────────────────────────────
-def save_chatlog(model: str, conversation: list):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = CHATLOG_DIR / f"{model}_chat_{timestamp}.json"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(conversation, f, ensure_ascii=False, indent=2)
-
-# ─── Retrieve Context Messages ──────────────────────────────────────────
-def retrieve_similar(user_prompt: str, k=4):
-    if not isinstance(user_prompt, str):
-        print(f"⚠️ Invalid prompt passed: {user_prompt}")
-        return []
-
-    scored = []
-    for msg in parsed_messages:
-        content = msg.get("content")
-        if msg.get("role") == "user" and isinstance(content, str):
-            score = SequenceMatcher(None, user_prompt.lower(), content.lower()).ratio()
-            scored.append((score, msg))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [m for _, m in scored[:k]]
-
-# ─── FastAPI Setup ──────────────────────────────────────────────────────
 app = FastAPI()
 
+# ─── CORS for Frontend ──────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # For dev only
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─── Request Schema ─────────────────────────────────────────────────────
 class ChatRequest(BaseModel):
     model: str
     prompt: str
+    session_id: str
 
+# ─── Startup Event: Load FAISS ──────────────────────────────────────────
+@app.on_event("startup")
+def startup_event():
+    print("🚀 Starting backend and initializing semantic retrieval...")
+    try:
+        initialize_retrieval()
+        print("✅ Retrieval system ready.")
+    except Exception as e:
+        print(f"❌ Retrieval failed to initialize: {e}")
+
+# ─── POST /chat — LangChain Chain ───────────────────────────────────────
 @app.post("/chat")
 async def chat(req: ChatRequest):
+    print(f"🟡 Incoming → model: {req.model}, session: {req.session_id}")
+    print(f"📝 Prompt: {req.prompt}")
+
     try:
-        print(f"🟡 Incoming request → model: {req.model}, prompt: {req.prompt}")
-
-        similar = retrieve_similar(req.prompt)
-        print(f"🔍 Retrieved {len(similar)} similar messages.")
-
-        memory = "\n".join([f"User: {m['content']}" for m in similar])
-        prompt_with_memory = f"{memory}\nUser: {req.prompt}\nAssistant:"
-
-        response = await query_ollama(req.model, prompt_with_memory)
-
-        convo = [{"role": "user", "content": req.prompt}, {"role": "assistant", "content": response}]
-        save_chatlog(req.model, convo)
-
-        return {"response": response}
-
+        chain = get_chain(session_id=req.session_id, model=req.model)
+        result = chain.invoke({"question": req.prompt})
+        print(f"✅ Chain result: {result['answer']}")
+        return {"response": result["answer"]}
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        print("❌ Error in /chat:", e)
+        return {"error": str(e)}
 
-# ─── Static Frontend ─────────────────────────────────────────────────────
-app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
-
+# ─── Serve Frontend ─────────────────────────────────────────────────────
 @app.get("/")
-async def root():
-    return FileResponse("frontend/index.html")
+def serve_frontend():
+    frontend_path = Path(__file__).parent.parent / "frontend" / "index.html"
+    if not frontend_path.exists():
+        raise RuntimeError(f"File at path {frontend_path} does not exist.")
+    return FileResponse(frontend_path)
